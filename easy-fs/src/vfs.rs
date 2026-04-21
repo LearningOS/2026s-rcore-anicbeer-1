@@ -183,4 +183,110 @@ impl Inode {
         });
         block_cache_sync_all();
     }
+    /// Get stat info of current inode
+    pub fn get_stat(&self) -> (u64, u64, u32, u32) {
+        let ino = ((self.block_id as u64) << 32) | (self.block_offset as u64);
+        self.read_disk_inode(|disk_inode| {
+            let mode = if disk_inode.is_dir() {
+                0o040000
+            } else {
+                0o100000
+            };
+            (0, ino, mode, disk_inode.nlink)
+        })
+    }
+    /// Create a hard link from old_name to new_name in current directory
+    pub fn link(&self, old_name: &str, new_name: &str) -> isize {
+        let mut fs = self.fs.lock();
+        let op = |root_inode: &DiskInode| {
+            assert!(root_inode.is_dir());
+            self.find_inode_id(old_name, root_inode)
+        };
+        let inode_id = match self.read_disk_inode(op) {
+            Some(id) => id,
+            None => return -1,
+        };
+        // Check if new_name already exists
+        let op2 = |root_inode: &DiskInode| {
+            self.find_inode_id(new_name, root_inode).is_some()
+        };
+        if self.read_disk_inode(op2) {
+            return -1;
+        }
+        // Increase nlink of target inode
+        let (target_block_id, target_block_offset) = fs.get_disk_inode_pos(inode_id);
+        get_block_cache(target_block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(target_block_offset, |disk_inode: &mut DiskInode| {
+                disk_inode.nlink += 1;
+            });
+        // Add new dirent
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let dirent = DirEntry::new(new_name, inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        block_cache_sync_all();
+        0
+    }
+    /// Remove a hard link
+    pub fn unlink(&self, name: &str) -> isize {
+        let mut fs = self.fs.lock();
+        let op = |root_inode: &DiskInode| {
+            assert!(root_inode.is_dir());
+            self.find_inode_id(name, root_inode)
+        };
+        let inode_id = match self.read_disk_inode(op) {
+            Some(id) => id,
+            None => return -1,
+        };
+        // Decrease nlink
+        let (target_block_id, target_block_offset) = fs.get_disk_inode_pos(inode_id);
+        get_block_cache(target_block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(target_block_offset, |disk_inode: &mut DiskInode| {
+                if disk_inode.nlink > 0 {
+                    disk_inode.nlink -= 1;
+                }
+            });
+        // Remove dirent from directory
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            let mut found_idx = None;
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device),
+                    DIRENT_SZ,
+                );
+                if dirent.name() == name {
+                    found_idx = Some(i);
+                    break;
+                }
+            }
+            if let Some(idx) = found_idx {
+                if idx + 1 < file_count {
+                    let last_idx = file_count - 1;
+                    assert_eq!(
+                        root_inode.read_at(DIRENT_SZ * last_idx, dirent.as_bytes_mut(), &self.block_device),
+                        DIRENT_SZ,
+                    );
+                    root_inode.write_at(
+                        DIRENT_SZ * idx,
+                        dirent.as_bytes(),
+                        &self.block_device,
+                    );
+                }
+                root_inode.size = ((file_count - 1) * DIRENT_SZ) as u32;
+            }
+        });
+        block_cache_sync_all();
+        0
+    }
 }

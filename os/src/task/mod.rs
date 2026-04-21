@@ -23,6 +23,7 @@ mod switch;
 mod task;
 
 use crate::fs::{open_file, OpenFlags};
+use crate::mm::{MapPermission, VirtAddr};
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
@@ -119,4 +120,31 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// mmap for current task
+pub fn mmap_current(start: VirtAddr, end: VirtAddr, perm: MapPermission) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    let memory_set = &mut inner.memory_set;
+    if memory_set.check_overlap(start.floor(), end.ceil()) {
+        return -1;
+    }
+    memory_set.insert_framed_area(start, end, perm);
+    0
+}
+
+/// munmap for current task
+pub fn munmap_current(start: VirtAddr, end: VirtAddr) -> isize {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    let memory_set = &mut inner.memory_set;
+    if !start.aligned() || !end.aligned() {
+        return -1;
+    }
+    if memory_set.remove_area(start, end) {
+        0
+    } else {
+        -1
+    }
 }

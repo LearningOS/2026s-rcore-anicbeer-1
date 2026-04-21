@@ -4,11 +4,12 @@ use alloc::sync::Arc;
 
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_refmut, translated_str, VirtAddr},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        mmap_current, munmap_current, suspend_current_and_run_next, TaskControlBlock,
     },
+    timer::get_time_us,
 };
 
 #[repr(C)]
@@ -102,33 +103,61 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// get time with second and microsecond
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel: sys_get_time");
+    let us = get_time_us();
+    let sec = us / 1_000_000;
+    let usec = us % 1_000_000;
+    let token = current_user_token();
+    let buffers = translated_byte_buffer(token, ts as *const u8, core::mem::size_of::<TimeVal>());
+    let mut time_bytes = [0u8; 16];
+    time_bytes[0..8].copy_from_slice(&sec.to_ne_bytes());
+    time_bytes[8..16].copy_from_slice(&usec.to_ne_bytes());
+    let mut offset = 0;
+    for buffer in buffers {
+        let len = buffer.len();
+        buffer.copy_from_slice(&time_bytes[offset..offset + len]);
+        offset += len;
+    }
+    0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// mmap: map physical frames to the given virtual address range
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    trace!("kernel: sys_mmap");
+    let start_va = VirtAddr::from(start);
+    let end_va = VirtAddr::from(start + len);
+    // start must be page-aligned
+    if !start_va.aligned() {
+        return -1;
+    }
+    // port validity check
+    if port & !0x7 != 0 {
+        return -1;
+    }
+    if port == 0 {
+        return -1;
+    }
+    let mut map_perm = crate::mm::MapPermission::U;
+    if port & 1 != 0 {
+        map_perm |= crate::mm::MapPermission::R;
+    }
+    if port & 2 != 0 {
+        map_perm |= crate::mm::MapPermission::W;
+    }
+    if port & 4 != 0 {
+        map_perm |= crate::mm::MapPermission::X;
+    }
+    mmap_current(start_va, end_va, map_perm)
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// munmap: unmap the given virtual address range
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel: sys_munmap");
+    let start_va = VirtAddr::from(start);
+    let end_va = VirtAddr::from(start + len);
+    munmap_current(start_va, end_va)
 }
 
 /// change data segment size
@@ -141,14 +170,26 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// spawn: create a new process from an executable file
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let data = app_inode.read_all();
+        let current_task = current_task().unwrap();
+        let new_task = Arc::new(TaskControlBlock::new(data.as_slice()));
+        let new_pid = new_task.pid.0;
+        // set parent
+        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&current_task));
+        // add to parent's children
+        current_task.inner_exclusive_access().children.push(new_task.clone());
+        // add to ready queue
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.

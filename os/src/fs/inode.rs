@@ -56,6 +56,8 @@ impl OSInode {
 }
 
 lazy_static! {
+    /// The root inode of the filesystem
+    #[allow(missing_docs)]
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -126,6 +128,10 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
 }
 
 impl File for OSInode {
+    fn get_fstat(&self) -> Option<(u64, u64, u32, u32)> {
+        let inner = self.inner.exclusive_access();
+        Some(inner.inode.get_stat())
+    }
     fn readable(&self) -> bool {
         self.readable
     }
