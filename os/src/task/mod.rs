@@ -14,7 +14,9 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -153,6 +155,53 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Increase the syscall count of current task.
+    fn increase_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        if syscall_id < MAX_SYSCALL_NUM {
+            inner.tasks[cur].syscall_times[syscall_id] += 1;
+        }
+    }
+
+    /// Get the syscall count of current task.
+    fn get_current_syscall_times(&self, syscall_id: usize) -> u32 {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        if syscall_id < MAX_SYSCALL_NUM {
+            inner.tasks[cur].syscall_times[syscall_id]
+        } else {
+            0
+        }
+    }
+
+    /// mmap for current task
+    fn mmap_current(&self, start: VirtAddr, end: VirtAddr, perm: MapPermission) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &mut inner.tasks[cur].memory_set;
+        if memory_set.check_overlap(start.floor(), end.ceil()) {
+            return -1;
+        }
+        memory_set.insert_framed_area(start, end, perm);
+        0
+    }
+
+    /// munmap for current task
+    fn munmap_current(&self, start: VirtAddr, end: VirtAddr) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &mut inner.tasks[cur].memory_set;
+        if !start.aligned() || !end.aligned() {
+            return -1;
+        }
+        if memory_set.remove_area(start, end) {
+            0
+        } else {
+            -1
+        }
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +250,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increase the syscall count of current task.
+pub fn increase_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.increase_syscall_count(syscall_id);
+}
+
+/// Get the syscall count of current task.
+pub fn current_syscall_times(syscall_id: usize) -> u32 {
+    TASK_MANAGER.get_current_syscall_times(syscall_id)
+}
+
+/// mmap for current task
+pub fn mmap_current(start: VirtAddr, end: VirtAddr, perm: MapPermission) -> isize {
+    TASK_MANAGER.mmap_current(start, end, perm)
+}
+
+/// munmap for current task
+pub fn munmap_current(start: VirtAddr, end: VirtAddr) -> isize {
+    TASK_MANAGER.munmap_current(start, end)
 }
