@@ -115,7 +115,9 @@ impl PageTable {
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             if i == 2 {
-                result = Some(pte);
+                if pte.is_valid() {
+                    result = Some(pte);
+                }
                 break;
             }
             if !pte.is_valid() {
