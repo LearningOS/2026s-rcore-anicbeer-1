@@ -197,9 +197,9 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
             .tid;
         let allocs = sem.get_alloc();
         let wait_for: Vec<usize> = allocs.iter().map(|(tid, _)| *tid).collect();
-        if !wait_for.is_empty()
-            && crate::sync::detect_deadlock(current_tid, &current_process(), wait_for)
-        {
+        let deadlocked = !wait_for.is_empty()
+            && crate::sync::detect_deadlock(current_tid, &current_process(), wait_for.clone());
+        if deadlocked {
             return -0xdead;
         }
     }
